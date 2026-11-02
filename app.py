@@ -217,9 +217,11 @@ def live():
             st.error(f'{sym}: Data unavailable ({e}). No signal.')
 live()
 def _csv_records(records):
-    if not records: return ''
+    if not records:
+        return ''
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=list(records[0].keys()))
+    fieldnames = list(dict.fromkeys(key for record in records for key in record.keys()))
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
     writer.writeheader()
     writer.writerows(records)
     return buf.getvalue()
@@ -303,11 +305,7 @@ if rows_log:
     st.dataframe(contracts, hide_index=True, use_container_width=True)
     st.download_button('Download contract-level evaluation CSV', _csv_records(contracts), file_name='v8_contract_evaluation.csv', mime='text/csv')
     st.dataframe(rows_log, use_container_width=True, hide_index=True)
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=list(rows_log[0]))
-    writer.writeheader()
-    writer.writerows(rows_log)
-    st.download_button('Download prediction history CSV', buf.getvalue(), file_name='kalshi_prediction_history.csv', mime='text/csv')
+    st.download_button('Download prediction history CSV', _csv_records(rows_log), file_name='kalshi_prediction_history.csv', mime='text/csv')
 else:
     st.info('No snapshots yet. Keep the scanner open to collect observations.')
 st.divider()
