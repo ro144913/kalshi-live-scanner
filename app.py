@@ -2,13 +2,15 @@ import math, re, statistics, csv, io, time
 from datetime import datetime, timezone
 import requests
 import streamlit as st
+from model import empirical_forecast, price_limit, classify
 
 st.set_page_config(page_title='Kalshi 15m Research Scanner',page_icon='📊',layout='wide')
-st.title('Kalshi 15-minute opportunity scanner — V6')
+st.title('Kalshi 15-minute historical opportunity scanner — V7')
 if 'signal_log' not in st.session_state: st.session_state.signal_log = {}
 if 'outcome_cache' not in st.session_state: st.session_state.outcome_cache = {}
+if 'contract_forecasts' not in st.session_state: st.session_state.contract_forecasts = {}
 st.caption('Auto-refresh ~5 seconds • Manual decisions only • Public market data; no Kalshi account connection')
-st.caption('Model signals are exploratory, not verified trading edges. Coinbase prices do not establish Kalshi settlement values.')
+st.caption('Historical Coinbase analog model • Fixed direction per contract • Experimental WATCH only until independently validated')
 BASE='https://external-api.kalshi.com/trade-api/v2'
 SERIES={'BTC':'KXBTC15M','ETH':'KXETH15M','SOL':'KXSOL15M','XRP':'KXXRP15M'}
 PRODUCT={'BTC':'BTC-USD','ETH':'ETH-USD','SOL':'SOL-USD','XRP':'XRP-USD'}
@@ -57,7 +59,7 @@ def live_coinbase_quote(sym):
 
 def get_candles(sym):
     rows=fetch(f'https://api.exchange.coinbase.com/products/{PRODUCT[sym]}/candles',{'granularity':60})
-    return sorted(rows,key=lambda r:r[0])[-60:]
+    return sorted(rows,key=lambda r:r[0])[-300:]
 
 def probability(spot,target,rows,seconds):
     closes=[float(r[4]) for r in rows if len(r)>4 and float(r[4])>0]
@@ -139,40 +141,45 @@ def live():
             candle_age = datetime.now(timezone.utc).timestamp() - float(rows[-1][0])
             if not (0 <= candle_age <= 180):
                 raise ValueError(f'Coinbase candles stale or future-dated ({candle_age:.0f}s)')
-            p,vol=probability(spot,target,rows,seconds) if target is not None else (None,None)
-            direction='UP' if p is not None and p>=.5 else 'DOWN' if p is not None else 'UNKNOWN'
-            signal='WAIT';reason='No verified numeric target available from this market record.'
-            entry=None;edge=None
-            if p is not None:
-                side_price=up if direction=='UP' else down
-                side_prob=p if direction=='UP' else 1-p
-                entry=max(0,side_prob*100-fee_cents-safety_cents)
-                if side_price is None:reason='No available ask quote for preferred side.'
-                elif not (0<side_price<1):reason='Quote is at an extreme or invalid.'
+            forecast = empirical_forecast(rows, spot, target, seconds/60) if target is not None else {'valid': False, 'reason': 'No verified numeric strike in market record.'}
+            p = forecast.get('p_up') if forecast.get('valid') else None
+            vol = None
+
+            ticker = m.get('ticker', '')
+            # Freeze initial direction and model probability for each contract.
+            # This prevents intracontract flip-flopping. Quote/timing gates update live.
+            frozen = st.session_state.contract_forecasts.get(ticker)
+            if frozen is None and p is not None and ticker:
+                frozen = {'direction': 'UP' if p >= .5 else 'DOWN', 'p_up': p,
+                          'created_utc': datetime.now(timezone.utc).isoformat(),
+                          'analogs': forecast['analogs'], 'effective_n': forecast['effective_n']}
+                st.session_state.contract_forecasts[ticker] = frozen
+            direction = frozen['direction'] if frozen else 'UNKNOWN'
+            locked_p = frozen['p_up'] if frozen else None
+            signal = 'WAIT'
+            reason = forecast.get('reason', 'Insufficient history for a model forecast.')
+            entry = None
+            edge = None
+            if frozen:
+                side_price = up if direction == 'UP' else down
+                side_prob = locked_p if direction == 'UP' else 1-locked_p
+                entry = price_limit(side_prob, fee_cents, safety_cents)
+                if side_price is not None:
+                    edge = side_prob*100 - side_price*100 - fee_cents
+                    signal, reason = classify(direction, side_price*100, entry, seconds, validated=False)
                 else:
-                    edge=side_prob*100-side_price*100-fee_cents
-                    if seconds<120:reason='Under 2 minutes: settlement/latency risk; no entry.'
-                    elif seconds>780:reason='Very early in window: no entry.'
-                    elif side_price*100<=entry and vol is not None:
-                        signal=f'WATCH {direction}'
-                        reason='Model-implied price clears the fee and safety margin. NOT a validated positive edge.'
-                    else:reason='Price does not clear estimated fee and safety margin.'
-            # Preserve the data-quality and fee gates, but display qualifying
-            # model screens as WATCH, never as a verified BUY recommendation.
-            if signal.startswith('WATCH'):
-                reason += ' Benchmark alignment is unverified; independently confirm settlement rules before trading.'
-            elif p is not None:
-                reason += ' No qualifying model-priced entry at this quote.'
+                    reason = 'No executable ask quote for preferred side.'
+            if p is not None and frozen and ((p >= .5) != (direction == 'UP')):
+                reason += ' Live proxy estimate changed direction; original contract forecast remains locked.'
             # One timestamped snapshot per contract per minute.
             # Session-only storage: Streamlit may restart and clear this history.
             now = datetime.now(timezone.utc)
-            ticker = m.get('ticker', '')
             log_key = f'{ticker}:{int(now.timestamp() // 60)}'
             if ticker and log_key not in st.session_state.signal_log:
                 st.session_state.signal_log[log_key] = {
                     'snapshot_id': log_key, 'observed_utc': now.isoformat(), 'symbol': sym, 'ticker': ticker,
                     'signal': signal, 'direction': direction,
-                    'model_up_probability': round(p, 5) if p is not None else None,
+                    'model_up_probability': round(locked_p, 5) if locked_p is not None else None,
                     'up_ask_cents': round(up*100, 2) if up is not None else None,
                     'down_ask_cents': round(down*100, 2) if down is not None else None,
                     'spot_coinbase': spot, 'coinbase_quote_age_seconds': round(quote_age, 2),
@@ -198,12 +205,13 @@ def live():
                 st.caption(f'Coinbase exchange timestamp: {quote_time}; candle age {candle_age:.0f}s')
                 st.caption('Benchmark not verified • Model estimates are exploratory; not a confirmed trading edge.')
                 st.write(f'Kalshi numeric target: **${target:,.4f}**' if target is not None else 'Kalshi numeric target: **Unavailable — no prediction**')
-                st.write(f'Model direction: **{direction}**')
-                st.write(f'Uncalibrated UP probability: **{p:.1%}**' if p is not None else 'Uncalibrated UP probability: N/A')
+                st.write(f'**Locked contract forecast: {direction}**' if frozen else 'Locked contract forecast: unavailable (insufficient history)')
+                st.write(f'Historical proxy UP probability at first observation: **{locked_p:.1%}**' if locked_p is not None else 'Historical proxy probability: unavailable')
+                if frozen: st.caption(f"Based on {frozen['analogs']} historical analogs; effective weighted sample {frozen['effective_n']:.0f}. Not calibrated to Kalshi settlements.")
                 st.write(f'Maximum model-derived entry: **{entry:.1f}¢**' if entry is not None else 'Maximum model-derived entry: N/A')
                 if edge is not None:st.write(f'Estimated edge before safety margin: **{edge:+.1f}¢** (highly model-dependent)')
                 st.info(reason)
-                st.caption('WATCH is a model screen only, not a buy instruction. Settlement-aligned data and out-of-sample validation remain outstanding.')
+                st.caption('WATCH is an experimental price screen, not a verified buy recommendation. Historical Coinbase analogs are NOT Kalshi settlement-aligned data.')
         except Exception as e:
             st.error(f'{sym}: Data unavailable ({e}). No signal.')
 live()
@@ -228,7 +236,7 @@ if db_config()[0]:
         st.error('Cloud history could not be loaded: ' + str(err))
 if rows_log:
     st.metric('Snapshots collected', len(rows_log))
-    st.metric('Model WATCH candidates (not verified entries)', sum(r['signal'].startswith('WATCH') for r in rows_log))
+    st.metric('Experimental WATCH snapshots', sum(r['signal'].startswith('WATCH') for r in rows_log))
     # Resolve only records whose contract has expired. Kalshi may not have finalized the result yet.
     if st.button('Check finalized outcomes'):
         tickers = sorted(set(r['ticker'] for r in rows_log if r['ticker']))
@@ -266,4 +274,4 @@ if rows_log:
 else:
     st.info('No snapshots yet. Keep the scanner open to collect observations.')
 st.divider()
-st.caption('Next validation milestone: official settlement-aligned benchmark feed and out-of-sample performance. Do not treat WATCH labels as proven profitable opportunities.')
+st.caption('V7 limitation: Coinbase analog forecasts are proxies; no verified CF Benchmarks input, historical Kalshi quote replay, calibrated win probability, or demonstrated net-positive backtest. No account access or automatic execution.')
