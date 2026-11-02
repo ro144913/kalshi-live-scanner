@@ -9,7 +9,7 @@ st.caption('EXPERIMENTAL direction screen • Not validated or a guaranteed edge
 BASE='https://external-api.kalshi.com/trade-api/v2'
 SERIES={'BTC':'KXBTC15M','ETH':'KXETH15M','SOL':'KXSOL15M','XRP':'KXXRP15M'}
 COINBASE={'BTC':'BTC-USD','ETH':'ETH-USD','SOL':'SOL-USD','XRP':'XRP-USD'}
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=4)
 def fetch(url,params=None):
  r=requests.get(url,params=params,timeout=12,headers={'User-Agent':'kalshi-15m-research/1.0'});r.raise_for_status();return r.json()
 def quote(m,key):
@@ -50,32 +50,36 @@ def screen(m,rows,up,down,mins):
 
 st.warning('IMPORTANT: UP/DOWN below is a research momentum indicator, NOT a calibrated prediction or a recommended real-money bet. The model does not yet know the contract target price or exact settlement benchmark. Paper-test before trading.')
 symbols=st.multiselect('Coins',list(SERIES),default=list(SERIES))
-if st.button('Refresh live quotes'):st.cache_data.clear()
-st.caption('Quotes are refreshed when you tap the button or reload. Public spot prices may differ from the Kalshi settlement benchmark.')
-for sym in symbols:
- try:
-  data=fetch(BASE+'/markets',{'series_ticker':SERIES[sym],'status':'open','limit':100})
-  markets=data.get('markets',[])
-  markets=[m for m in markets if (minutes(m) or -1)>0]
-  if not markets:st.info(f'{sym}: No active contract found');continue
-  m=min(markets,key=lambda m:minutes(m))
-  up=quote(m,'yes_ask');down=quote(m,'no_ask');yb=quote(m,'yes_bid');nb=quote(m,'no_bid')
-  if up is None and nb is not None:up=1-nb
-  if down is None and yb is not None:down=1-yb
-  remaining=minutes(m)
+if st.button('Refresh now'):st.cache_data.clear()
+st.caption('Auto-updates about every 5 seconds while this page is open. Data may be delayed; public spot prices may differ from the Kalshi settlement benchmark.')
+@st.fragment(run_every='5s')
+def live_cards():
+ for sym in symbols:
   try:
-   rows=candles(sym);signal,reason,strength=screen(m,rows,up,down,remaining);spot=float(rows[-1][4])
-  except Exception as e:
-   signal,reason,strength='WAIT',f'Spot data unavailable: {e}',None;spot=None
-  with st.container(border=True):
-   st.subheader(f'{sym} — {signal}')
-   st.caption(f"{m.get('title','')} | {m.get('ticker','')}")
-   a,b,c=st.columns(3)
-   a.metric('UP ask',fmt(up));b.metric('DOWN ask',fmt(down));c.metric('Minutes left',f'{remaining:.1f}')
-   st.write('Coinbase spot:',f'${spot:,.4f}' if spot else 'Unavailable')
-   st.write('Momentum strength:',f'{strength:.2f}× noise' if strength is not None else 'N/A')
-   st.info(reason)
-   st.caption('Missing: exact Kalshi target, benchmark settlement price, order book depth, fees, and historical calibration. Signals may be wrong.')
- except Exception as e:st.error(f'{sym}: {e}')
+   data=fetch(BASE+'/markets',{'series_ticker':SERIES[sym],'status':'open','limit':100})
+   markets=data.get('markets',[])
+   markets=[m for m in markets if (minutes(m) or -1)>0]
+   if not markets:st.info(f'{sym}: No active contract found');continue
+   m=min(markets,key=lambda m:minutes(m))
+   up=quote(m,'yes_ask');down=quote(m,'no_ask');yb=quote(m,'yes_bid');nb=quote(m,'no_bid')
+   if up is None and nb is not None:up=1-nb
+   if down is None and yb is not None:down=1-yb
+   remaining=minutes(m)
+   try:
+    rows=candles(sym);signal,reason,strength=screen(m,rows,up,down,remaining);spot=float(rows[-1][4])
+   except Exception as e:
+    signal,reason,strength='WAIT',f'Spot data unavailable: {e}',None;spot=None
+   with st.container(border=True):
+    st.subheader(f'{sym} — {signal}')
+    st.caption(f"{m.get('title','')} | {m.get('ticker','')}")
+    a,b,c=st.columns(3)
+    a.metric('UP ask',fmt(up));b.metric('DOWN ask',fmt(down));c.metric('Minutes left',f'{remaining:.1f}')
+    st.write('Coinbase spot:',f'${spot:,.4f}' if spot else 'Unavailable')
+    st.write('Momentum strength:',f'{strength:.2f}× noise' if strength is not None else 'N/A')
+    st.info(reason)
+    st.caption('Missing: exact Kalshi target, benchmark settlement price, order book depth, fees, and historical calibration. Signals may be wrong.')
+  except Exception as e:st.error(f'{sym}: {e}')
+
+live_cards()
 st.divider()
 st.write('Next upgrade: contract-specific target/reference feed, settlement-aware probabilities, fee-adjusted entry thresholds, and backtesting. Until then, this is a research tool, not a trade recommendation.')
