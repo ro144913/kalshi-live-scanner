@@ -4,11 +4,11 @@ import requests
 import streamlit as st
 
 st.set_page_config(page_title='Kalshi 15m Research Scanner',page_icon='📊',layout='wide')
-st.title('Kalshi 15-minute research scanner — V5')
+st.title('Kalshi 15-minute opportunity scanner — V6')
 if 'signal_log' not in st.session_state: st.session_state.signal_log = {}
 if 'outcome_cache' not in st.session_state: st.session_state.outcome_cache = {}
-st.caption('Auto-refresh ~5 seconds • Manual decisions only • V5 benchmark safety gate')
-st.warning('V5 SAFETY: UP/DOWN are research directions only. The scanner will show WAIT until the exact Kalshi settlement benchmark is integrated and verified. Coinbase spot is not an interchangeable settlement price.')
+st.caption('Auto-refresh ~5 seconds • Manual decisions only • Public market data; no Kalshi account connection')
+st.caption('Model signals are exploratory, not verified trading edges. Coinbase prices do not establish Kalshi settlement values.')
 BASE='https://external-api.kalshi.com/trade-api/v2'
 SERIES={'BTC':'KXBTC15M','ETH':'KXETH15M','SOL':'KXSOL15M','XRP':'KXXRP15M'}
 PRODUCT={'BTC':'BTC-USD','ETH':'ETH-USD','SOL':'SOL-USD','XRP':'XRP-USD'}
@@ -154,18 +154,15 @@ def live():
                     if seconds<120:reason='Under 2 minutes: settlement/latency risk; no entry.'
                     elif seconds>780:reason='Very early in window: no entry.'
                     elif side_price*100<=entry and vol is not None:
-                        signal=f'EXPERIMENTAL {direction}'
+                        signal=f'WATCH {direction}'
                         reason='Model-implied price clears the fee and safety margin. NOT a validated positive edge.'
                     else:reason='Price does not clear estimated fee and safety margin.'
-            # CRITICAL: Kalshi's in-app benchmark may not equal Coinbase spot.
-            # A fresh quote and model-derived probability are insufficient to recommend a trade.
-            # Do not emit actionable UP/DOWN until a verified settlement-aligned feed exists.
-            if signal.startswith('EXPERIMENTAL'):
-                reason = ('Research price screen passed, but the exact Kalshi settlement '
-                          'benchmark is NOT verified against Coinbase. WAIT; no trade signal.')
+            # Preserve the data-quality and fee gates, but display qualifying
+            # model screens as WATCH, never as a verified BUY recommendation.
+            if signal.startswith('WATCH'):
+                reason += ' Benchmark alignment is unverified; independently confirm settlement rules before trading.'
             elif p is not None:
-                reason = reason + ' Settlement benchmark NOT verified; WAIT.'
-            signal = 'WAIT'
+                reason += ' No qualifying model-priced entry at this quote.'
             # One timestamped snapshot per contract per minute.
             # Session-only storage: Streamlit may restart and clear this history.
             now = datetime.now(timezone.utc)
@@ -199,14 +196,14 @@ def live():
                 a.metric('UP ask',cents(up));b.metric('DOWN ask',cents(down));c.metric('Time left',f'{max(0,seconds)//60:.0f}:{int(max(0,seconds)%60):02d}')
                 st.write(f'Coinbase last trade: **${spot:,.4f}** (quote age **{quote_age:.1f}s**)')
                 st.caption(f'Coinbase exchange timestamp: {quote_time}; candle age {candle_age:.0f}s')
-                st.error('Settlement benchmark: NOT VERIFIED. This is a research estimate, not an executable recommendation.')
+                st.caption('Benchmark not verified • Model estimates are exploratory; not a confirmed trading edge.')
                 st.write(f'Kalshi numeric target: **${target:,.4f}**' if target is not None else 'Kalshi numeric target: **Unavailable — no prediction**')
-                st.write(f'Experimental direction: **{direction}**')
+                st.write(f'Model direction: **{direction}**')
                 st.write(f'Uncalibrated UP probability: **{p:.1%}**' if p is not None else 'Uncalibrated UP probability: N/A')
                 st.write(f'Maximum model-derived entry: **{entry:.1f}¢**' if entry is not None else 'Maximum model-derived entry: N/A')
                 if edge is not None:st.write(f'Estimated edge before safety margin: **{edge:+.1f}¢** (highly model-dependent)')
                 st.info(reason)
-                st.caption('V5 blocks all entry signals until a confirmed Kalshi settlement-aligned price feed is available. No validated performance or demonstrated profitable edge.')
+                st.caption('WATCH is a model screen only, not a buy instruction. Settlement-aligned data and out-of-sample validation remain outstanding.')
         except Exception as e:
             st.error(f'{sym}: Data unavailable ({e}). No signal.')
 live()
@@ -231,7 +228,7 @@ if db_config()[0]:
         st.error('Cloud history could not be loaded: ' + str(err))
 if rows_log:
     st.metric('Snapshots collected', len(rows_log))
-    st.metric('Entry signals (benchmark safety gate)', sum(r['signal'].startswith('EXPERIMENTAL') for r in rows_log))
+    st.metric('Model WATCH candidates (not verified entries)', sum(r['signal'].startswith('WATCH') for r in rows_log))
     # Resolve only records whose contract has expired. Kalshi may not have finalized the result yet.
     if st.button('Check finalized outcomes'):
         tickers = sorted(set(r['ticker'] for r in rows_log if r['ticker']))
@@ -269,4 +266,4 @@ if rows_log:
 else:
     st.info('No snapshots yet. Keep the scanner open to collect observations.')
 st.divider()
-st.caption('Next: obtain and verify the exact Kalshi settlement-aligned index/price feed, then test source divergence, latency, fees, depth, and out-of-sample performance. Do not scale position sizes on unvalidated signals.')
+st.caption('Next validation milestone: official settlement-aligned benchmark feed and out-of-sample performance. Do not treat WATCH labels as proven profitable opportunities.')
