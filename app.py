@@ -3,14 +3,15 @@ from datetime import datetime, timezone
 import requests
 import streamlit as st
 from model import empirical_forecast, price_limit, classify
+from analytics import first_contract_records, metrics, calibration
 
 st.set_page_config(page_title='Kalshi 15m Research Scanner',page_icon='📊',layout='wide')
-st.title('Kalshi 15-minute historical opportunity scanner — V7')
+st.title('Kalshi 15-minute historical opportunity scanner — V8')
 if 'signal_log' not in st.session_state: st.session_state.signal_log = {}
 if 'outcome_cache' not in st.session_state: st.session_state.outcome_cache = {}
 if 'contract_forecasts' not in st.session_state: st.session_state.contract_forecasts = {}
 st.caption('Auto-refresh ~5 seconds • Manual decisions only • Public market data; no Kalshi account connection')
-st.caption('Historical Coinbase analog model • Fixed direction per contract • Experimental WATCH only until independently validated')
+st.caption('Historical Coinbase analog model • Fixed direction per contract • Contract-level accuracy dashboard • Experimental WATCH')
 BASE='https://external-api.kalshi.com/trade-api/v2'
 SERIES={'BTC':'KXBTC15M','ETH':'KXETH15M','SOL':'KXSOL15M','XRP':'KXXRP15M'}
 PRODUCT={'BTC':'BTC-USD','ETH':'ETH-USD','SOL':'SOL-USD','XRP':'XRP-USD'}
@@ -215,6 +216,14 @@ def live():
         except Exception as e:
             st.error(f'{sym}: Data unavailable ({e}). No signal.')
 live()
+def _csv_records(records):
+    if not records: return ''
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(records[0].keys()))
+    writer.writeheader()
+    writer.writerows(records)
+    return buf.getvalue()
+
 st.divider()
 st.subheader('Prediction tracking and outcomes')
 if db_config()[0]:
@@ -255,16 +264,44 @@ if rows_log:
             if r['ticker'] in st.session_state.outcome_cache:
                 r['actual_result'] = st.session_state.outcome_cache[r['ticker']]
         st.success('Checked available finalized results. Unsettled contracts remain PENDING.')
-    finalized = [r for r in rows_log if r['actual_result'] in ('UP','DOWN') and r['direction'] in ('UP','DOWN')]
-    if finalized:
-        correct = sum(r['direction'] == r['actual_result'] for r in finalized)
-        st.write(f'**Directional agreement across snapshots:** {correct}/{len(finalized)} ({correct/len(finalized):.1%}). Repeated snapshots of one contract are NOT independent predictions.')
-        unique = {}
-        for r in finalized:
-            unique.setdefault(r['ticker'], r)
-        if unique:
-            n = len(unique)
-            st.write(f'**First-snapshot accuracy by distinct settled contract:** {sum(r["direction"] == r["actual_result"] for r in unique.values())}/{n}. This does not measure trading profitability.')
+    # Each contract contributes at most one forecast to accuracy metrics.
+    # Repeated per-minute observations must never inflate the win rate.
+    contracts = first_contract_records(rows_log)
+    st.subheader('V8 — Forecast accuracy by settled contract')
+    st.caption('Only finalized YES/NO Kalshi results are scored. The forecast is taken from the earliest stored snapshot per ticker. Earlier V7 snapshots may not be settlement-benchmark aligned.')
+    results = metrics(contracts, fee_cents)
+    x, y, z = st.columns(3)
+    x.metric('Settled contracts scored', results['settled'])
+    y.metric('Direction accuracy', f"{results['accuracy']:.1%}" if results['accuracy'] is not None else 'N/A')
+    z.metric('Brier score (lower is better)', f"{results['brier']:.3f}" if results['brier'] is not None else 'N/A')
+    if results['settled'] < 100:
+        st.warning('Small evaluation sample: do not interpret this as proven predictive accuracy. At least 100 distinct settled contracts is a preliminary checkpoint, not a guarantee of reliability.')
+    if not any(r['benchmark_verified'] for r in contracts):
+        st.warning('Settlement benchmark alignment remains unverified. Kalshi outcomes can be recorded, but Coinbase-based model probabilities are not independently calibrated.')
+    st.subheader('Results by cryptocurrency')
+    by_symbol = []
+    for sym in symbols:
+        group = [r for r in contracts if r['symbol'] == sym]
+        stats = metrics(group, fee_cents)
+        by_symbol.append({'Symbol': sym, 'Settled contracts': stats['settled'],
+                          'Correct forecasts': stats['correct'],
+                          'Accuracy': f"{stats['accuracy']:.1%}" if stats['accuracy'] is not None else 'N/A',
+                          'Brier score': round(stats['brier'], 3) if stats['brier'] is not None else None})
+    st.dataframe(by_symbol, hide_index=True, use_container_width=True)
+    st.subheader('Probability calibration')
+    calibration_rows = calibration(contracts)
+    if calibration_rows:
+        st.dataframe(calibration_rows, hide_index=True, use_container_width=True)
+        st.caption('Compare average predicted UP probability with actual UP frequency. Sparse bands are highly uncertain.')
+    else:
+        st.info('Calibration requires finalized contracts with stored probabilities.')
+    st.subheader('Hypothetical WATCH-entry outcomes')
+    st.caption('Uses the first observed WATCH ask for each settled contract and the fee estimate currently selected above. This is a hypothetical quote-based calculation, NOT executed trades, fill prices, or realized P/L. Slippage and order-book depth are not included.')
+    st.metric('Settled contracts with WATCH quotes', results['hypothetical_n'])
+    st.metric('Hypothetical net (cents, one contract per WATCH)', f"{results['hypothetical_net_cents']:+.1f}¢" if results['hypothetical_net_cents'] is not None else 'N/A')
+    st.subheader('Contract-level forecast ledger')
+    st.dataframe(contracts, hide_index=True, use_container_width=True)
+    st.download_button('Download contract-level evaluation CSV', _csv_records(contracts), file_name='v8_contract_evaluation.csv', mime='text/csv')
     st.dataframe(rows_log, use_container_width=True, hide_index=True)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=list(rows_log[0]))
@@ -274,4 +311,4 @@ if rows_log:
 else:
     st.info('No snapshots yet. Keep the scanner open to collect observations.')
 st.divider()
-st.caption('V7 limitation: Coinbase analog forecasts are proxies; no verified CF Benchmarks input, historical Kalshi quote replay, calibrated win probability, or demonstrated net-positive backtest. No account access or automatic execution.')
+st.caption('V8 limitation: Coinbase analog forecasts are proxies; no verified CF Benchmarks input, historical Kalshi quote replay, calibrated win probability, or demonstrated net-positive backtest. No account access or automatic execution.')
