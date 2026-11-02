@@ -1,10 +1,12 @@
-import math, re, statistics
+import math, re, statistics, csv, io, time
 from datetime import datetime, timezone
 import requests
 import streamlit as st
 
 st.set_page_config(page_title='Kalshi 15m Research Scanner',page_icon='📊',layout='wide')
 st.title('Kalshi 15-minute research scanner')
+if 'signal_log' not in st.session_state: st.session_state.signal_log = {}
+if 'outcome_cache' not in st.session_state: st.session_state.outcome_cache = {}
 st.caption('Auto-refresh ~5 seconds • Manual decisions only • Experimental, unvalidated model')
 st.warning('Signals are experimental, not proven profitable. Coinbase spot is NOT necessarily Kalshi’s settlement benchmark. Never use this tool alone to justify larger bets.')
 BASE='https://external-api.kalshi.com/trade-api/v2'
@@ -94,6 +96,23 @@ def live():
                         signal=f'EXPERIMENTAL {direction}'
                         reason='Model-implied price clears the fee and safety margin. NOT a validated positive edge.'
                     else:reason='Price does not clear estimated fee and safety margin.'
+            # One timestamped snapshot per contract per minute, plus any signal change.
+            # Session-only storage: Streamlit may restart and clear this history.
+            now = datetime.now(timezone.utc)
+            ticker = m.get('ticker', '')
+            log_key = f'{ticker}:{int(now.timestamp() // 60)}'
+            if ticker and log_key not in st.session_state.signal_log:
+                st.session_state.signal_log[log_key] = {
+                    'observed_utc': now.isoformat(), 'symbol': sym, 'ticker': ticker,
+                    'signal': signal, 'direction': direction,
+                    'model_up_probability': round(p, 5) if p is not None else None,
+                    'up_ask_cents': round(up*100, 2) if up is not None else None,
+                    'down_ask_cents': round(down*100, 2) if down is not None else None,
+                    'spot_coinbase': spot, 'kalshi_target': target,
+                    'seconds_remaining': round(seconds, 1),
+                    'model_edge_cents': round(edge, 2) if edge is not None else None,
+                    'actual_result': 'PENDING'
+                }
             with st.container(border=True):
                 st.subheader(f'{sym} — {signal}')
                 st.caption(f"{m.get('title','')} • {m.get('ticker','')}")
@@ -106,9 +125,49 @@ def live():
                 st.write(f'Maximum model-derived entry: **{entry:.1f}¢**' if entry is not None else 'Maximum model-derived entry: N/A')
                 if edge is not None:st.write(f'Estimated edge before safety margin: **{edge:+.1f}¢** (highly model-dependent)')
                 st.info(reason)
-                st.caption('Not a trade instruction. Uses Coinbase spot rather than confirmed Kalshi settlement benchmark. Estimates can be materially wrong. No live performance validation.')
+                st.caption('Not a trade instruction. Uses Coinbase spot rather than confirmed Kalshi settlement benchmark. Estimates can be materially wrong. No validated live performance or demonstrated profitable edge.')
         except Exception as e:
             st.error(f'{sym}: Data unavailable ({e}). No signal.')
 live()
+st.divider()
+st.subheader('Prediction tracking (this browser session)')
+st.caption('Captures at most one snapshot per contract per minute while this page is running. Reloads, app restarts, or sleeping iPhones may erase or interrupt tracking. Download the CSV regularly. This is not a permanent database.')
+if st.session_state.signal_log:
+    rows_log = list(st.session_state.signal_log.values())
+    st.metric('Snapshots collected', len(rows_log))
+    st.metric('Experimental entry signals', sum(r['signal'].startswith('EXPERIMENTAL') for r in rows_log))
+    # Resolve only records whose contract has expired. Kalshi may not have finalized the result yet.
+    if st.button('Check finalized outcomes'):
+        tickers = sorted(set(r['ticker'] for r in rows_log if r['ticker']))
+        for ticker in tickers:
+            try:
+                data = fetch(BASE + '/markets/' + ticker).get('market', {})
+                result = str(data.get('result') or '').lower()
+                if result in ('yes', 'no'):
+                    st.session_state.outcome_cache[ticker] = 'UP' if result == 'yes' else 'DOWN'
+            except Exception:
+                pass
+        for r in rows_log:
+            if r['ticker'] in st.session_state.outcome_cache:
+                r['actual_result'] = st.session_state.outcome_cache[r['ticker']]
+        st.success('Checked available finalized results. Unsettled contracts remain PENDING.')
+    finalized = [r for r in rows_log if r['actual_result'] in ('UP','DOWN') and r['direction'] in ('UP','DOWN')]
+    if finalized:
+        correct = sum(r['direction'] == r['actual_result'] for r in finalized)
+        st.write(f'**Directional agreement across snapshots:** {correct}/{len(finalized)} ({correct/len(finalized):.1%}). Repeated snapshots of one contract are NOT independent predictions.')
+        unique = {}
+        for r in finalized:
+            unique.setdefault(r['ticker'], r)
+        if unique:
+            n = len(unique)
+            st.write(f'**First-snapshot accuracy by distinct settled contract:** {sum(r["direction"] == r["actual_result"] for r in unique.values())}/{n}. This does not measure trading profitability.')
+    st.dataframe(rows_log, use_container_width=True, hide_index=True)
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(rows_log[0]))
+    writer.writeheader()
+    writer.writerows(rows_log)
+    st.download_button('Download prediction history CSV', buf.getvalue(), file_name='kalshi_prediction_history.csv', mime='text/csv')
+else:
+    st.info('No snapshots yet. Keep the scanner open to collect observations.')
 st.divider()
 st.caption('Next research requirements: confirm Kalshi benchmark and strike for every series, integrate executable order-book depth and actual fees, record timestamped signals, and backtest out of sample before any position-size increase.')
