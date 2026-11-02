@@ -81,7 +81,7 @@ if st.button('Refresh now'):st.cache_data.clear()
 def db_config():
     try:
         url = str(st.secrets.get('SUPABASE_URL', '')).rstrip('/')
-        key = str(st.secrets.get('SUPABASE_SERVICE_ROLE_KEY', ''))
+        key = str(st.secrets.get('SUPABASE_KEY', ''))
         if url.startswith('https://') and key:
             return url, {'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}
     except Exception:
@@ -213,7 +213,7 @@ live()
 st.divider()
 st.subheader('Prediction tracking and outcomes')
 if db_config()[0]:
-    st.success('Cloud persistence configured. Snapshots survive browser reloads and Streamlit restarts once successfully saved.')
+    st.info('Supabase credentials detected. Cloud persistence is confirmed only after a successful database read/write.')
 else:
     st.warning('Cloud persistence NOT configured: history is session-only. Follow SETUP.md to connect Supabase.')
 if st.session_state.get('db_error'):
